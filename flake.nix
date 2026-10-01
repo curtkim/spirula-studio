@@ -89,7 +89,8 @@
 
         spirula-studio = pkgs.callPackage ({ lib, stdenv, cmake, ninja, makeWrapper
                                           , vulkan-headers, vulkan-loader
-                                          , curl, ffmpeg, withFfmpeg ? true }:
+                                          , curl, ffmpeg, withFfmpeg ? true
+                                          , withPatented ? false }:
           let
             # Must match cmake/SsOptions.cmake's SS_VERSION, which postPatch
             # rewrites to carry the revision.
@@ -135,6 +136,17 @@
               # It reads the uncommitted git diff, so it is a no-op on a source
               # with no .git; off explicitly keeps python out of the build.
               (lib.cmakeBool "SS_CHECK_COMMENTS" false)
+              # src/video/: container demux plus VK_KHR_video_decode_* and
+              # _encode_*. Off, every caller shells out to ffmpeg, which costs a
+              # subprocess and roughly 15x on frame extraction (docs/build.md).
+              # On, it is in-process on the GPU -- and it is also the one part
+              # of this GPLv3 tree carrying third-party patent exposure
+              # (H.264/H.265 via MPEG LA and Access Advance, AV1 via the claims
+              # against AOMedia, HEIF's container its own). Local use is one
+              # decision and shipping binaries is another; read that section of
+              # docs/build.md before turning it on. No extra dependency: the
+              # Vulkan loader and headers already here are all it needs.
+              (lib.cmakeBool "SS_ENABLE_PATENTED" withPatented)
             ];
 
             # Roughly 750 MB of RAM per compile job, which is what
@@ -157,9 +169,11 @@
 
             # Checkpoints (SAM, BiRefNet, GroundingDINO, ALIKED, LoMa, Metric3D,
             # MoGe) are fetched on first use by shelling out to `curl`
-            # (src/nn/io/Fetch.cpp), and with SS_ENABLE_PATENTED off, frame
-            # extraction and video encoding shell out to `ffmpeg`. Neither is
-            # reached through a library, so both have to be on PATH.
+            # (src/nn/io/Fetch.cpp), and frame extraction and video encoding
+            # shell out to `ffmpeg` whenever the in-process decoder is absent --
+            # withPatented = false, or a device with no video queue even when it
+            # is true. Neither is reached through a library, so both have to be
+            # on PATH.
             postFixup = ''
               wrapProgram "$out/bin/spirula" \
                 --prefix PATH : ${lib.makeBinPath ([ curl ] ++ lib.optional withFfmpeg ffmpeg)}
@@ -171,8 +185,9 @@
                 The `spirula` executable with the Vulkan compute backend and no
                 GUI: `spirula train`, `spirula sfm`, `spirula sam` and
                 `spirula mesh`. Video decode and encode go through the external
-                `ffmpeg`, since SS_ENABLE_PATENTED is off -- read that section
-                of docs/build.md before turning it on.
+                `ffmpeg` by default; `withPatented = true` builds src/video/ and
+                does it in-process on the GPU instead -- read that section of
+                docs/build.md first.
               '';
               homepage = "https://github.com/spirulae/spirula-studio";
               license = lib.licenses.gpl3Only;
@@ -180,6 +195,12 @@
               mainProgram = "spirula";
             };
           }) { };
+
+        # In-process GPU video decode and encode: much faster frame extraction
+        # and `spirula encode`, at the cost of compiling the patent-encumbered
+        # src/video/. Deliberately a separate attribute rather than the default,
+        # so turning it on is something someone chose.
+        spirula-studio-patented = spirula-studio.override { withPatented = true; };
       });
 
       devShells = forAllSystems (pkgs: {
